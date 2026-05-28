@@ -4,7 +4,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import torch
-import wandb
+from wandb_shim import wandb
 from sklearn import metrics
 from sklearn.metrics import precision_score, recall_score, f1_score
 from sklearn.utils import resample

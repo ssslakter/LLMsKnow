@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
-import wandb
+from wandb_shim import wandb
 from transformers import set_seed
 
 from compute_correctness import compute_correctness

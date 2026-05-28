@@ -4,7 +4,7 @@ import pickle
 import numpy as np
 import pandas as pd
 import torch
-import wandb
+from wandb_shim import wandb
 from sklearn.utils import resample
 
 from compute_correctness import CORRECTNESS_FN

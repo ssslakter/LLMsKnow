@@ -2,7 +2,7 @@ import argparse
 import sys
 
 import numpy as np
-import wandb
+from wandb_shim import wandb
 from sklearn.utils import resample
 
 from compute_correctness import compute_correctness_triviaqa, compute_correctness_math, compute_correctness

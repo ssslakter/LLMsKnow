@@ -5,7 +5,7 @@ import os
 import numpy as np
 import pandas as pd
 import torch
-import wandb
+from wandb_shim import wandb
 from datasets import load_dataset
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm

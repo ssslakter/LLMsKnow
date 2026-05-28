@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
 import torch
-import wandb
+from wandb_shim import wandb
 from transformers import set_seed
 
 from probing_utils import extract_internal_reps_all_layers_and_tokens, load_model_and_validate_gpu, \

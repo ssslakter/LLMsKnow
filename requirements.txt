@@ -9,6 +9,7 @@ seaborn==0.13.2
 torch==2.2.0
 tqdm==4.66.5
 transformers==4.42.3
-wandb==0.15.12
+# wandb==0.15.12
+trackio
 accelerate==0.27.0
 tokenizers==0.19.1

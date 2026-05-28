@@ -7,7 +7,7 @@ from os.path import exists
 import numpy as np
 import pandas as pd
 import torch
-import wandb
+from wandb_shim import wandb
 from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.utils import resample

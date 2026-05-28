@@ -4,7 +4,7 @@ from collections import defaultdict
 import numpy as np
 import pandas as pd
 import torch
-import wandb
+from wandb_shim import wandb
 from sklearn.utils import resample
 
 from detection_by_logprob import metric_fn

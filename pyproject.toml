@@ -1,0 +1,27 @@
+[project]
+name = "llmsknow"
+version = "0.1.0"
+description = "Reproducing and extending LLMs Know More Than They Show (Orgad et al., ICLR 2025)"
+readme = "README.md"
+requires-python = "==3.11.6"
+dependencies = [
+    "baukit",
+    "datasets==2.21.0",
+    "matplotlib==3.9.2",
+    "numpy==1.26.4",
+    "pandas==1.5.1",
+    "scikit_learn==1.5.2",
+    "scipy==1.14.1",
+    "seaborn==0.13.2",
+    "torch==2.2.0",
+    "tqdm==4.66.5",
+    "transformers==4.42.3",
+    "trackio",
+    "accelerate==0.27.0",
+    "tokenizers==0.19.1",
+    # Phase 2:
+    "transformer_lens",
+]
+
+[tool.uv.sources]
+baukit = { git = "https://github.com/davidbau/baukit" }
