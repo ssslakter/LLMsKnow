@@ -73,13 +73,24 @@ The script chains five steps; if any step fails the run aborts (`set -e`). Outpu
 
 ## Results
 
-To be filled in after Phase 0 completes — `phase0.log` carries the full stdout/stderr.
+Phase 0 acceptance bar (TZ): AUROC ≈ 0.7-0.8 (paper Table 1, Mistral-7B-Instruct row, TriviaQA column). **Result: 0.797 ± 0.015 — within the bar.**
 
-| metric | seed mean ± std |
+Settings: layer 15, token `exact_answer_last_token`, probe_at `mlp`, n=1000 per split, batch_size=8, seeds `0 5 26 42 63`, LogisticRegression.
+
+| metric | mean ± std |
 | --- | --- |
-| AUROC (validation, 1000 train→split) | _TBD_ |
-| AUROC (held-out test, triviaqa_test) | _TBD_ |
-| Acc on greedy generation (triviaqa) | _TBD_ |
-| Acc on greedy generation (triviaqa_test) | _TBD_ |
+| AUROC (held-out `triviaqa_test`) | **0.797 ± 0.015** |
+| AUROC (validation = 1000-train → internal split) | 0.785 ± 0.044 |
+| Acc at default 0.5 threshold (test) | 0.783 ± 0.016 |
+| Baseline acc — majority class (test) | 0.720 ± 0.014 |
+| Δ acc vs baseline (test) | +6.3 ± 1.3 pp |
+| Precision (test) | 0.755 ± 0.027 |
+| Recall (test) | 0.332 ± 0.050 |
+| F1 (test) | 0.459 ± 0.049 |
 
-Acceptance bar from the TZ: AUROC ≈ 0.7-0.8 territory (Table 1 in the paper, Mistral-7B-Instruct row, TriviaQA column).
+Notes:
+- Baseline acc 0.72 on `triviaqa_test` means ≈28% of Mistral-7B-Instruct's greedy answers are wrong at n=1000.
+- The probe is conservative at threshold 0.5 (high precision, low recall). The 0.797 AUROC is the threshold-free summary and the number to compare to the paper.
+- Std on the held-out test is tight (1.5pp); validation std is larger (4.4pp) because the train pool is only 1000 and seed-driven splits move more.
+
+Saved probe: `checkpoints/clf_mistral-7b-instruct_triviaqa_layer-15_token-exact_answer_last_token.pkl` — Phase 1 reuses this directly.
