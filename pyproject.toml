@@ -17,6 +17,7 @@ dependencies = [
     "tqdm==4.66.5",
     "transformers==4.42.3",
     "trackio",
+    "trackio-ui",
     "accelerate==0.27.0",
     "tokenizers==0.19.1",
     # Phase 2:
