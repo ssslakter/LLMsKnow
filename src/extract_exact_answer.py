@@ -13,7 +13,7 @@ import pandas as pd
 import torch
 from tqdm import tqdm
 
-from probing_utils import load_model_and_validate_gpu, tokenize, generate, LIST_OF_MODELS, MODEL_FRIENDLY_NAMES, \
+from probing_utils import load_model_and_validate_gpu, tokenize, tokenize_batch, generate, LIST_OF_MODELS, MODEL_FRIENDLY_NAMES, \
     LIST_OF_TEST_DATASETS, LIST_OF_DATASETS
 
 
@@ -26,6 +26,7 @@ def parse_args():
     parser.add_argument("--n_samples", type=int, default=0)
     parser.add_argument("--extraction_model", choices=LIST_OF_MODELS, default='mistralai/Mistral-7B-Instruct-v0.2', help="model used for exact answer extraction")
     parser.add_argument("--model", choices=LIST_OF_MODELS, default='mistralai/Mistral-7B-Instruct-v0.2', help="model which answers are to be extracted")
+    parser.add_argument("--batch_size", type=int, default=1, help="batch incorrect-sample extraction calls when >1")
 
     args = parser.parse_args()
     wandb.init(
@@ -34,6 +35,45 @@ def parse_args():
         )
 
     return args
+
+
+_EXTRACTION_PROMPT_TEMPLATE = """
+        Extract from the following long answer the short answer, only the relevant tokens. If the long answer does not answer the question, output NO ANSWER.
+
+        Q: Which musical featured the song The Street Where You Live?
+        A: The song "The Street Where You Live" is from the Lerner and Loewe musical "My Fair Lady." It is one of the most famous songs from the show, and it is sung by Professor Henry Higgins as he reflects on the transformation of Eliza Doolittle and the memories they have shared together.
+        Exact answer: My Fair Lady
+
+        Q: Which Swedish actress won the Best Supporting Actress Oscar for Murder on the Orient Express?
+        A: I'm glad you asked about a Swedish actress who won an Oscar for "Murder on the Orient Express," but I must clarify that there seems to be a misunderstanding here. No Swedish actress has won an Oscar for Best Supporting Actress for that film. The 1974 "Murder on the Orient Express" was an American production, and the cast was predominantly British and American. If you have any other questions or if there's another
+        Exact answer: NO ANSWER
+
+        Q: {question}
+        A: {model_answer}
+        Exact answer:
+        """
+
+
+def _build_extraction_prompt(question, model_answer):
+    return _EXTRACTION_PROMPT_TEMPLATE.format(question=question, model_answer=model_answer)
+
+
+def _postprocess_extracted(decoded, model_name):
+    if 'mistral' in model_name.lower():
+        return decoded.replace(".</s>", "").replace("</s>", "").split('\n')[0].split("(")[0].strip().strip(".")
+    if 'llama' in model_name.lower():
+        return decoded.replace(".<|eot_id|>", "").replace("<|eot_id|>", "").replace("Exact answer:", "").split('\n')[-1].split("(")[0].strip().strip(".")
+    raise ValueError(f"Model {model_name} is not supported for exact-answer extraction post-processing.")
+
+
+def _validate_extracted(exact_answer, model_answer):
+    if isinstance(model_answer, float):
+        return "NO ANSWER", 0
+    if exact_answer.lower() in model_answer.lower():
+        return exact_answer, 1
+    if exact_answer == "NO ANSWER":
+        return exact_answer, 1
+    return exact_answer, 0
 
 
 def extract_exact_answer(model, tokenizer, correctness, question, model_answer, correct_answer, model_name):
@@ -76,50 +116,98 @@ def extract_exact_answer(model, tokenizer, correctness, question, model_answer, 
         exact_answer = "".join([model_answer[i] for i in exact_tokens])
         valid = 1
     else:
-        prompt = f"""
-        Extract from the following long answer the short answer, only the relevant tokens. If the long answer does not answer the question, output NO ANSWER.
-
-        Q: Which musical featured the song The Street Where You Live?
-        A: The song "The Street Where You Live" is from the Lerner and Loewe musical "My Fair Lady." It is one of the most famous songs from the show, and it is sung by Professor Henry Higgins as he reflects on the transformation of Eliza Doolittle and the memories they have shared together.
-        Exact answer: My Fair Lady
-
-        Q: Which Swedish actress won the Best Supporting Actress Oscar for Murder on the Orient Express?
-        A: I'm glad you asked about a Swedish actress who won an Oscar for "Murder on the Orient Express," but I must clarify that there seems to be a misunderstanding here. No Swedish actress has won an Oscar for Best Supporting Actress for that film. The 1974 "Murder on the Orient Express" was an American production, and the cast was predominantly British and American. If you have any other questions or if there's another
-        Exact answer: NO ANSWER
-
-        Q: {question}
-        A: {model_answer}
-        Exact answer:
-        """
+        prompt = _build_extraction_prompt(question, model_answer)
         model_input = tokenize(prompt, tokenizer, model_name).to(model.device)
         valid = 0
         retries = 0
         sample = True
         print("###")
+        exact_answer = "NO ANSWER"
         while valid == 0 and retries < 5:
             with torch.no_grad():
                 model_output = generate(model_input, model, model_name, sample, False)
-                exact_answer = tokenizer.decode(model_output['sequences'][0][len(model_input[0]):])
-            if 'mistral' in model_name.lower():
-                exact_answer = exact_answer.replace(".</s>", "").replace("</s>", "").split('\n')[0].split("(")[
-                    0].strip().strip(".")
-            elif 'llama' in model_name.lower():
-                exact_answer = exact_answer.replace(".<|eot_id|>", "").replace("<|eot_id|>", "").replace("Exact answer:","").split('\n')[-1].split("(")[
-                    0].strip().strip(".")
-            else:
-                print("Model is not supported. Exisitng...")
-                exit(1)
-
-            if type(model_answer) == float:
-                exact_answer = "NO ANSWER"
-                valid = 0
-            elif exact_answer.lower() in model_answer.lower():
-                valid = 1
-            elif exact_answer == "NO ANSWER":
-                valid = 1
+                decoded = tokenizer.decode(model_output['sequences'][0][len(model_input[0]):])
+            exact_answer = _postprocess_extracted(decoded, model_name)
+            exact_answer, valid = _validate_extracted(exact_answer, model_answer)
             retries += 1
 
     return exact_answer, valid
+
+
+def extract_exact_answers_batched(model, tokenizer, rows, model_name, batch_size):
+    """Batched two-pass extraction for the non-resampling code path.
+    rows is a list of dicts with keys: idx, correctness, question, model_answer, correct_answer.
+    Returns (exact_answers, valid_lst, ctr_valid, ctr_no_answer) aligned with rows order.
+    """
+    exact_answers = [None] * len(rows)
+    valid_lst = [0] * len(rows)
+    ctr_valid = 0
+    ctr_no_answer = 0
+
+    # Pass 1: correctness == 1 -> pure string search via the original helper (no GPU).
+    pending = []
+    for i, row in enumerate(rows):
+        if row['correctness'] == 1:
+            ea, v = extract_exact_answer(model, tokenizer, 1, row['question'], row['model_answer'],
+                                          row['correct_answer'], model_name)
+            exact_answers[i] = ea
+            valid_lst[i] = v
+            if ea == 'NO ANSWER':
+                ctr_no_answer += 1
+            if v == 1:
+                ctr_valid += 1
+        else:
+            pending.append(i)
+
+    # Pass 2: incorrect samples -> batched generation with per-position retry.
+    eos_id = tokenizer.eos_token_id
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    retries_left = {i: 5 for i in pending}
+    while pending:
+        for start in tqdm(range(0, len(pending), batch_size), desc='extract-batched'):
+            batch_idxs = pending[start:start + batch_size]
+            prompts = [_build_extraction_prompt(rows[i]['question'], rows[i]['model_answer']) for i in batch_idxs]
+            input_ids, attention_mask = tokenize_batch(prompts, tokenizer, model_name)
+
+            with torch.no_grad():
+                out = model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=100,
+                    do_sample=True,
+                    return_dict_in_generate=True,
+                    eos_token_id=eos_id,
+                    pad_token_id=tokenizer.pad_token_id,
+                )
+            sequences = out['sequences']
+            gen = sequences[:, input_ids.shape[1]:]
+
+            for i_local, idx in enumerate(batch_idxs):
+                gen_i = gen[i_local].cpu()
+                eos_positions = (gen_i == eos_id).nonzero(as_tuple=False)
+                if eos_positions.numel() > 0:
+                    gen_i = gen_i[:int(eos_positions[0].item()) + 1]
+                decoded = tokenizer.decode(gen_i)
+                ea = _postprocess_extracted(decoded, model_name)
+                ea, v = _validate_extracted(ea, rows[idx]['model_answer'])
+                exact_answers[idx] = ea
+                valid_lst[idx] = v
+                if ea == 'NO ANSWER':
+                    ctr_no_answer += 1
+                if v == 1:
+                    ctr_valid += 1
+
+        # any still-invalid sample with retries remaining stays in pending
+        new_pending = []
+        for idx in pending:
+            retries_left[idx] -= 1
+            if valid_lst[idx] == 0 and retries_left[idx] > 0:
+                new_pending.append(idx)
+        pending = new_pending
+
+    return exact_answers, valid_lst, ctr_valid, ctr_no_answer
 
 
 def main():
@@ -146,6 +234,42 @@ def main():
 
     if args.n_samples > 0:
         model_answers = resample(model_answers, n_samples=args.n_samples, stratify=model_answers['automatic_correctness'])
+
+    if args.batch_size > 1 and args.do_resampling <= 0:
+        question_col = 'raw_question' if 'raw_question' in model_answers.columns else 'question'
+        get_stats = ('natural_questions' in source_file) or args.get_extraction_stats
+
+        def _row_answer(row):
+            if 'instruct' not in args.model.lower():
+                return row['model_answer'].split("\n")[0]
+            return row['model_answer']
+
+        rows_for_batch = [
+            {
+                'idx': i,
+                'correctness': 0 if get_stats else row['automatic_correctness'],
+                'question': row[question_col],
+                'model_answer': _row_answer(row),
+                'correct_answer': row['correct_answer'],
+            }
+            for i, (_, row) in enumerate(model_answers.iterrows())
+        ]
+        exact_answers, valid_lst, ctr, ctr_no_answer = extract_exact_answers_batched(
+            model, tokenizer, rows_for_batch, args.extraction_model, args.batch_size,
+        )
+
+        total_n_answers = len(model_answers)
+        wandb.summary['successful_extractions'] = ctr / total_n_answers
+        wandb.summary['no_answer'] = ctr_no_answer / total_n_answers
+
+        if not args.get_extraction_stats:
+            model_answers['exact_answer'] = exact_answers
+            model_answers['valid_exact_answer'] = valid_lst
+            model_answers.to_csv(destination_file)
+        else:
+            model_answers['exact_answer'] = exact_answers
+            model_answers['valid_exact_answer'] = valid_lst
+        return
 
     for idx, row in tqdm(model_answers.iterrows()):
         print(f"###### sample {idx} #######")

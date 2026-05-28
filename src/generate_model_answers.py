@@ -12,7 +12,7 @@ from tqdm import tqdm
 from transformers import set_seed
 
 from compute_correctness import compute_correctness
-from probing_utils import load_model_and_validate_gpu, tokenize, generate, LIST_OF_DATASETS, MODEL_FRIENDLY_NAMES, \
+from probing_utils import load_model_and_validate_gpu, tokenize, tokenize_batch, generate, LIST_OF_DATASETS, MODEL_FRIENDLY_NAMES, \
     LIST_OF_MODELS
 
 
@@ -25,6 +25,8 @@ def parse_args():
                         choices=LIST_OF_DATASETS)
     parser.add_argument("--verbose", action='store_true', help='print more information')
     parser.add_argument("--n_samples", type=int, help='number of examples to use', default=None)
+    parser.add_argument("--batch_size", type=int, default=1,
+                        help='generate this many prompts at once. >1 enables batched generation.')
 
 
     return parser.parse_args()
@@ -228,6 +230,83 @@ def generate_model_answers(data, model, tokenizer, device, model_name, do_sample
                 print(f"Prompt: {prompt}")
                 print(f"Answer: {answer}")
             counter += 1
+
+    return all_textual_answers, all_input_output_ids, all_scores, all_output_ids
+
+
+def generate_model_answers_batched(data, model, tokenizer, device, model_name, batch_size,
+                                    output_scores=False, max_new_tokens=100, stop_token_id=None, verbose=False):
+    """Batched greedy generation. Produces the same per-sample outputs as the unbatched loop:
+    each input_output_ids[i] holds the unpadded prompt followed by the model's generated tokens
+    up to and including the first EOS (so downstream get_token_index sees the same sequence).
+    """
+    eos_id = stop_token_id if stop_token_id is not None else tokenizer.eos_token_id
+
+    all_textual_answers = []
+    all_scores = []
+    all_input_output_ids = []
+    all_output_ids = []
+    counter = 0
+
+    for start in tqdm(range(0, len(data), batch_size)):
+        prompts = list(data[start:start + batch_size])
+        input_ids, attention_mask = tokenize_batch(prompts, tokenizer, model_name)
+        prompt_len = input_ids.shape[1]
+
+        with torch.no_grad():
+            model_output = model.generate(
+                input_ids,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                output_scores=output_scores,
+                return_dict_in_generate=True,
+                eos_token_id=eos_id,
+                pad_token_id=tokenizer.pad_token_id,
+            )
+
+        sequences = model_output['sequences']  # (B, prompt_len + new_tokens)
+        gen = sequences[:, prompt_len:]        # (B, new_tokens)
+        # scores: tuple length new_tokens of (B, vocab)
+        scores_stack = None
+        if output_scores:
+            scores_stack = torch.stack(model_output['scores'], dim=0).cpu()  # (new_tokens, B, vocab)
+
+        for i, prompt in enumerate(prompts):
+            gen_i = gen[i].cpu()
+            # find first EOS in the generated portion; if absent, keep the whole thing
+            eos_positions = (gen_i == eos_id).nonzero(as_tuple=False)
+            if eos_positions.numel() > 0:
+                keep = int(eos_positions[0].item()) + 1  # include EOS, matching unbatched
+            else:
+                keep = gen_i.shape[0]
+            gen_i = gen_i[:keep]
+
+            # unpadded prompt for sample i (strip left padding)
+            mask_i = attention_mask[i]
+            prompt_start = int((mask_i == 1).nonzero(as_tuple=False)[0].item())
+            prompt_ids_i = input_ids[i, prompt_start:].cpu()
+
+            answer = tokenizer.decode(gen_i)
+            all_textual_answers.append(answer)
+            all_input_output_ids.append(torch.cat([prompt_ids_i, gen_i], dim=0))
+
+            if output_scores:
+                # (kept, vocab) — same shape as unbatched torch.concatenate(model_output['scores'])
+                all_scores.append(scores_stack[:keep, i, :])
+                all_output_ids.append(gen_i)
+
+            if verbose and counter % 100 == 0:
+                print(f"Counter: {counter}")
+                print(f"Prompt: {prompt}")
+                print(f"Answer: {answer}")
+            counter += 1
+
+        # be friendly to memory between batches when scores are huge
+        del model_output, sequences, gen
+        if scores_stack is not None:
+            del scores_stack
+        torch.cuda.empty_cache()
 
     return all_textual_answers, all_input_output_ids, all_scores, all_output_ids
 
@@ -502,10 +581,15 @@ def main():
         else:
             all_questions = preprocess_fn(args.model, all_questions, labels)
 
-    model_answers, input_output_ids, all_scores, all_output_ids = generate_model_answers(all_questions, model,
-                                                                                         tokenizer, device, args.model,
-                                                                                         output_scores=True, max_new_tokens=max_new_tokens,
-                                                                                         stop_token_id=stop_token_id)
+    if args.batch_size and args.batch_size > 1:
+        model_answers, input_output_ids, all_scores, all_output_ids = generate_model_answers_batched(
+            all_questions, model, tokenizer, device, args.model, batch_size=args.batch_size,
+            output_scores=True, max_new_tokens=max_new_tokens, stop_token_id=stop_token_id)
+    else:
+        model_answers, input_output_ids, all_scores, all_output_ids = generate_model_answers(all_questions, model,
+                                                                                             tokenizer, device, args.model,
+                                                                                             output_scores=True, max_new_tokens=max_new_tokens,
+                                                                                             stop_token_id=stop_token_id)
 
     res = compute_correctness(all_questions, args.dataset, args.model, labels, model, model_answers, tokenizer, wrong_labels)
     correctness = res['correctness']

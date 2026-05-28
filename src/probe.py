@@ -32,6 +32,7 @@ def parse_args_and_init_wandb():
     parser.add_argument("--save_clf", action='store_true', default=False, help="Whether to save the clf. If true, will look for a classifier before training and load it if exists.")
     parser.add_argument("--dataset", choices=LIST_OF_DATASETS, required=True)
     parser.add_argument("--test_dataset", choices=LIST_OF_DATASETS, required=False, default=None)
+    parser.add_argument("--batch_size", type=int, default=1, help="batch hidden-state extraction forwards when >1")
 
     args = parser.parse_args()
 
@@ -50,7 +51,7 @@ def parse_args_and_init_wandb():
 
 def probe(model, tokenizer, data, input_output_ids, token, layer, probe_at, seeds,
               model_name, dataset_name, n_samples,
-          data_test=None, input_output_ids_test=None, clf=None):
+          data_test=None, input_output_ids_test=None, clf=None, batch_size=1):
 
     train_clf = clf is None
 
@@ -66,6 +67,7 @@ def probe(model, tokenizer, data, input_output_ids, token, layer, probe_at, seed
                                                            input_output_ids_train_valid, probe_at, model_name,
                                                            layer, token, exact_answer_train_valid,
                                                            validity_of_exact_answer_train_valid,
+                                                           batch_size=batch_size,
                                                            )
         X_train_valid = np.array(X_train_valid)
 
@@ -86,7 +88,8 @@ def probe(model, tokenizer, data, input_output_ids, token, layer, probe_at, seed
         X_test = extract_internal_reps_specific_layer_and_token(model, tokenizer, questions_test,
                                                                 input_output_ids_test, probe_at, model_name, layer,
                                                                 token,
-                                                                exact_answer_test, validity_of_exact_answer_test)
+                                                                exact_answer_test, validity_of_exact_answer_test,
+                                                                batch_size=batch_size)
 
     valid_metrics_per_seed = defaultdict(list)
     test_metrics_per_seed = defaultdict(list)
@@ -181,7 +184,8 @@ def main():
 
     res = probe(model, tokenizer, data, input_output_ids, args.token,
                                                    args.layer, args.probe_at, args.seeds, args.model, args.dataset,
-                                                    args.n_samples, data_test, input_output_ids_test, clf)
+                                                    args.n_samples, data_test, input_output_ids_test, clf,
+                                                    batch_size=args.batch_size)
 
     if load_test:
         metrics_test = res[1]

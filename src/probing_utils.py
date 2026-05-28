@@ -108,6 +108,27 @@ def tokenize(prompt, tokenizer, model_name, tokenizer_args=None):
     return model_input
 
 
+def tokenize_batch(prompts, tokenizer, model_name):
+    """Left-padded batched tokenization. Returns (input_ids, attention_mask) on cuda.
+    For decoder-only models, left padding is required so generated tokens align across the batch.
+    """
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = 'left'
+
+    if 'instruct' in model_name.lower():
+        rendered = [
+            tokenizer.apply_chat_template(
+                [{"role": "user", "content": p}], tokenize=False, add_generation_prompt=True
+            )
+            for p in prompts
+        ]
+        enc = tokenizer(rendered, return_tensors='pt', padding=True, add_special_tokens=False)
+    else:
+        enc = tokenizer(list(prompts), return_tensors='pt', padding=True)
+    return enc['input_ids'].to('cuda'), enc['attention_mask'].to('cuda')
+
+
 def generate(model_input, model, model_name, do_sample=False, output_scores=False, temperature=1.0, top_k=50, top_p=1.0,
              max_new_tokens=100, stop_token_id=None, tokenizer=None, output_hidden_states=False, additional_kwargs=None):
 
@@ -270,19 +291,74 @@ def get_attention_output(model, ret, layers_to_trace, probe_at):
 
 def extract_internal_reps_specific_layer_and_token(model, tokenizer, prompts, input_output_ids_lst,
                                                    probe_at, model_name, layer, token, exact_answers,
-                                                   exact_answers_valid, use_dict_for_tokens=False):
-    all_reps = []
+                                                   exact_answers_valid, use_dict_for_tokens=False,
+                                                   batch_size=1):
+    """When batch_size > 1, runs forwards in mini-batches with left-padded input_output_ids and
+    extracts only the requested layer/token. Falls back to the original per-sample loop otherwise."""
     length = len(input_output_ids_lst)
     print(
         f"Extracting internal reps from layer {layer} and token {token} from {length} textual inputs...")
 
-    for idx, (input_output_ids, prompt, exact_answer, exact_answer_valid) in tqdm(enumerate(zip(input_output_ids_lst, prompts, exact_answers, exact_answers_valid))):
+    if batch_size <= 1:
+        all_reps = []
+        for idx, (input_output_ids, prompt, exact_answer, exact_answer_valid) in tqdm(enumerate(zip(input_output_ids_lst, prompts, exact_answers, exact_answers_valid))):
+            output = extract_internal_reps_single_sample(model, input_output_ids, probe_at, model_name)
+            t = get_token_index(token, tokenizer, prompt, model_name, input_output_ids,
+                                exact_answer, exact_answer_valid, use_dict=use_dict_for_tokens)
+            rep = output[layer][t].float().numpy()
+            all_reps.append(rep)
+        return all_reps
 
-        output = extract_internal_reps_single_sample(model, input_output_ids, probe_at, model_name)
-        t = get_token_index(token, tokenizer, prompt, model_name, input_output_ids,
-                            exact_answer, exact_answer_valid, use_dict=use_dict_for_tokens)
-        rep = output[layer][t].float().numpy()
-        all_reps.append(rep)
+    return _extract_internal_reps_batched(model, tokenizer, prompts, input_output_ids_lst,
+                                          probe_at, model_name, layer, token, exact_answers,
+                                          exact_answers_valid, use_dict_for_tokens, batch_size)
+
+
+def _extract_internal_reps_batched(model, tokenizer, prompts, input_output_ids_lst,
+                                    probe_at, model_name, layer, token, exact_answers,
+                                    exact_answers_valid, use_dict_for_tokens, batch_size):
+    layers_to_trace = get_probing_layer_names(probe_at, model_name)
+    target_layer_name = layers_to_trace[layer]
+    pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
+    device = model.device
+
+    # Resolve each sample's target token index (relative to its own unpadded sequence) up front.
+    token_indices = []
+    for i, ids in enumerate(input_output_ids_lst):
+        t = get_token_index(token, tokenizer, prompts[i], model_name, ids,
+                            exact_answers[i], exact_answers_valid[i], use_dict=use_dict_for_tokens)
+        token_indices.append(int(t))
+
+    all_reps = [None] * len(input_output_ids_lst)
+    for start in tqdm(range(0, len(input_output_ids_lst), batch_size)):
+        chunk = list(range(start, min(start + batch_size, len(input_output_ids_lst))))
+        seqs = [input_output_ids_lst[i] for i in chunk]
+        max_len = max(s.shape[0] for s in seqs)
+
+        # Left-pad to max_len.
+        input_ids = torch.full((len(chunk), max_len), pad_id, dtype=seqs[0].dtype)
+        attention_mask = torch.zeros((len(chunk), max_len), dtype=torch.long)
+        for j, s in enumerate(seqs):
+            n = s.shape[0]
+            input_ids[j, max_len - n:] = s
+            attention_mask[j, max_len - n:] = 1
+        input_ids = input_ids.to(device)
+        attention_mask = attention_mask.to(device)
+
+        with torch.no_grad():
+            with TraceDict(model, [target_layer_name], retain_input=True, clone=True) as ret:
+                model(input_ids, attention_mask=attention_mask)
+
+        if 'input' in probe_at:
+            captured = ret[target_layer_name].input.cpu()
+        else:
+            captured = ret[target_layer_name].output.cpu()
+        # captured: (B, max_len, hidden)
+
+        for j, i in enumerate(chunk):
+            offset = max_len - seqs[j].shape[0]   # left-pad length for this row
+            t_local = offset + token_indices[i]
+            all_reps[i] = captured[j, t_local].float().numpy()
 
     return all_reps
 

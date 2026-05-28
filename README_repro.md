@@ -15,6 +15,17 @@ Fork of [technion-cs-nlp/LLMsKnow](https://github.com/technion-cs-nlp/LLMsKnow).
 - `wandb` is replaced by `trackio` via a thin shim at `src/wandb_shim.py` (preserves the `wandb.summary[k] = v`, `wandb.Artifact`, `wandb.run.name`, `wandb.Image`, `wandb.log_artifact` surface that the author scripts use).
 - Hardware used here: one RTX 3090 (24 GB). Mistral-7B-Instruct-v0.2 loads in bf16 via `device_map='auto'`.
 
+### Batching deviation from author code
+
+Author scripts run batch=1 throughout. On a single 3090 this underutilises the GPU heavily (we measured ~5× speedup at batch=8 on TriviaQA generation, comparable wins on hidden-state extraction). We added `--batch_size` to `generate_model_answers.py`, `extract_exact_answer.py`, and `probe.py`. The unbatched code paths are untouched and remain the default.
+
+**Numerical caveat:** bf16 batched generation is not bit-exact vs batch=1. On a 20-sample TriviaQA smoke test:
+- generated answer text matches unbatched on ~30% of samples; the rest drift to different but valid continuations (`compute_correctness` labels match 20/20).
+- hidden states at MLP-out layer 15 have a per-element max-abs error ≈ 0.003-0.007 (mean magnitude ≈ 0.022) — left-padding changes the RoPE/attention reduction order.
+- Critically, this noise washes out at the probe: a logistic regression trained on either feature set produces predicted probabilities with Pearson correlation 0.99999 and max absolute difference < 0.002.
+
+We therefore treat the batched path as the production setup and accept the small drift in raw generations. The probe AUROC reported below was obtained at `batch_size=8`.
+
 ## Datasets
 
 - TriviaQA unfiltered: extracted from `triviaqa-unfiltered.tar.gz` into `data/triviaqa-unfiltered/{unfiltered-web-train.json, unfiltered-web-dev.json}`.

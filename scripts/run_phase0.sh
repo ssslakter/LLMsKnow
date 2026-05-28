@@ -14,20 +14,21 @@ LAYER=15
 TOKEN="exact_answer_last_token"
 PROBE_AT="mlp"
 SEEDS="0 5 26 42 63"
+BATCH_SIZE=8
 
 cd src
 
 echo "==> [1/5] generate train answers"
-uv run python generate_model_answers.py --model "$MODEL" --dataset triviaqa --n_samples "$N"
+uv run python generate_model_answers.py --model "$MODEL" --dataset triviaqa --n_samples "$N" --batch_size "$BATCH_SIZE"
 
 echo "==> [2/5] generate test answers"
-uv run python generate_model_answers.py --model "$MODEL" --dataset triviaqa_test --n_samples "$N"
+uv run python generate_model_answers.py --model "$MODEL" --dataset triviaqa_test --n_samples "$N" --batch_size "$BATCH_SIZE"
 
 echo "==> [3/5] extract exact answer (train)"
-uv run python extract_exact_answer.py --model "$MODEL" --dataset triviaqa --extraction_model "$MODEL"
+uv run python extract_exact_answer.py --model "$MODEL" --dataset triviaqa --extraction_model "$MODEL" --batch_size "$BATCH_SIZE"
 
 echo "==> [4/5] extract exact answer (test)"
-uv run python extract_exact_answer.py --model "$MODEL" --dataset triviaqa_test --extraction_model "$MODEL"
+uv run python extract_exact_answer.py --model "$MODEL" --dataset triviaqa_test --extraction_model "$MODEL" --batch_size "$BATCH_SIZE"
 
 echo "==> [5/5] train probe (layer=$LAYER token=$TOKEN probe_at=$PROBE_AT)"
 uv run python probe.py \
@@ -38,6 +39,7 @@ uv run python probe.py \
     --save_clf \
     --dataset triviaqa \
     --layer "$LAYER" \
-    --token "$TOKEN"
+    --token "$TOKEN" \
+    --batch_size "$BATCH_SIZE"
 
 echo "==> Phase 0 done."
