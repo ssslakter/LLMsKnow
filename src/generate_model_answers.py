@@ -12,7 +12,7 @@ from tqdm import tqdm
 from transformers import set_seed
 
 from compute_correctness import compute_correctness
-from probing_utils import load_model_and_validate_gpu, tokenize, tokenize_batch, generate, LIST_OF_DATASETS, MODEL_FRIENDLY_NAMES, \
+from probing_utils import load_model_and_validate_gpu, tokenize, tokenize_batch, generate, LIST_OF_DATASETS, LIST_OF_TEST_DATASETS, MODEL_FRIENDLY_NAMES, \
     LIST_OF_MODELS
 
 
@@ -22,7 +22,7 @@ def parse_args():
                         choices=LIST_OF_MODELS,
                         required=True)
     parser.add_argument("--dataset",
-                        choices=LIST_OF_DATASETS)
+                        choices=LIST_OF_DATASETS + LIST_OF_TEST_DATASETS)
     parser.add_argument("--verbose", action='store_true', help='print more information')
     parser.add_argument("--n_samples", type=int, help='number of examples to use', default=None)
     parser.add_argument("--batch_size", type=int, default=1,
